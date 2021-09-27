@@ -1124,6 +1124,7 @@ ARGP_PROGRAM_VERSION_HOOK_DEF = dwarves_print_version;
 #define ARGP_sort_output	   328
 #define ARGP_hashbits		   329
 #define ARGP_devel_stats	   330
+#define ARGP_filter_rule	   331
 
 static const struct argp_option pahole__options[] = {
 	{
@@ -1495,9 +1496,195 @@ static const struct argp_option pahole__options[] = {
 		.doc  = "Print internal data structures stats",
 	},
 	{
+		.name = "filter_rule",
+		.key  = ARGP_filter_rule,
+		.arg  = "STRING",
+		.doc  = "filter by rule",
+	},
+	{
 		.name = NULL,
 	}
 };
+
+static int setargs(char *args, char **argv)
+{
+	int count = 0;
+	int flag = 0;
+
+	while (isspace(*args)) ++args;
+	while (*args) {
+		if (*args == '\'') {
+			++args;
+			flag = 1;
+		}
+		if (argv) argv[count] = args;
+		while (*args && (flag || !isspace(*args))) {
+			++args;
+			if (*args == '\'') {
+				if (argv) *args = ' ';
+				flag = 0;
+			}
+		}
+		if (argv && *args) *args++ = '\0';
+		while (isspace(*args)) ++args;
+		count++;
+	}
+	return count;
+}
+
+char **parsedargs(char *args, int *argc)
+{
+	char **argv = NULL;
+	int    argn = 0;
+
+	if (args && *args
+	&& (args = strdup(args))
+	&& (argn = setargs(args,NULL))
+	&& (argv = malloc((argn+2) * sizeof(char *)))) {
+		*argv++ = args;
+		*(argv+argn) = 0;
+		argn = setargs(args,argv);
+	}
+
+	if (args && *args && !argv) free(args);
+
+	*argc = argn;
+	return argv;
+}
+
+void freeparsedargs(char **argv)
+{
+	if (argv) {
+		//free(argv[-1]);
+		free(argv-1);
+	}
+}
+
+bool is_prefix(const char *pfx, const char *str)
+{
+	if (!pfx)
+		return false;
+	if (strlen(str) < strlen(pfx))
+		return false;
+
+	return !memcmp(str, pfx, strlen(pfx));
+}
+
+static char **parse_offset(char **argv)
+{
+	int i = 0, min = 0, max = 0, j;
+	struct filter_rule *filter_rule = &conf_load.conf_rule;
+	int n = filter_rule->rule_num;
+	char *endptr;
+
+	while (i < n && *argv) {
+		filter_rule->rule[i].offset = strtoul(*argv, &endptr, 10);
+		if (*endptr) {
+			printf("error parsing byte: %s", *argv);
+			return NULL;
+		}
+		if (i == 0) {
+			min = max = filter_rule->rule[i].offset;
+		} else {
+			if (filter_rule->rule[i].offset > max) {
+				max = filter_rule->rule[i].offset;
+			} else if (filter_rule->rule[i].offset < min) {
+				min = filter_rule->rule[i].offset;
+			}
+		}
+		argv++;
+		if (is_prefix("struct", *argv)) {
+			if (strstr(*argv, "*")) {
+				filter_rule->rule[i].tag = DW_TAG_pointer_type;
+			} else {
+				filter_rule->rule[i].tag = DW_TAG_structure_type;
+			}
+		} else if (is_prefix("@self", *argv)) {
+			filter_rule->rule[i].cnt = 0;
+			j = 0;
+			endptr = strstr(*argv, "*");
+			while(endptr[j]) {
+				if (endptr[j] == '*')
+					filter_rule->rule[i].cnt++;
+				j++;
+			}
+			if (filter_rule->rule[i].cnt)
+				filter_rule->rule[i].tag = DW_TAG_pointer_type;
+		}
+		filter_rule->rule[i].name = *argv;
+		argv++;
+		i++;
+	}
+	filter_rule->offset_min = min;
+	filter_rule->offset_max = max;
+
+	return argv;
+}
+
+static int parse_rule(char **argv)
+{
+	char *endptr;
+	struct filter_rule *filter_rule = &conf_load.conf_rule;
+
+	if (is_prefix("offset", *argv)) {
+		argv++;
+		if (!*argv) {
+			return 0;
+		}
+		filter_rule->rule_num = strtoul(*argv, &endptr, 10);
+		filter_rule->rule = (struct filter_rule_offset *) malloc(filter_rule->rule_num * sizeof(struct filter_rule_offset));
+		if (!filter_rule->rule) {
+			printf("malloc for filter_rule_offset fail \n");
+			return -1;
+		}
+		memset(filter_rule->rule, 0, filter_rule->rule_num * sizeof(struct filter_rule_offset));
+
+		argv++;
+		if (!*argv) {
+			return 0;
+		}
+		argv = parse_offset(argv);
+		if (!argv || !*argv) {
+			return 0;
+		}
+		return parse_rule(argv);
+	} else if (is_prefix("size", *argv)) {
+		argv++;
+		if (!*argv) {
+			return 0;
+		}
+		filter_rule->size = strtoul(*argv, &endptr, 10);
+		argv++;
+		if (!*argv) {
+			return 0;
+		}
+		return parse_rule(argv);
+	}
+
+	return 0;
+}
+
+static int pahole__deal_filter_rule_opt(char *arg)
+{
+	int argc, ret = 0;
+	char **argv = NULL;
+
+	argv = parsedargs(arg, &argc);
+	if (argv == NULL) {
+		ret = -1;
+		goto out;
+	}
+
+	if (parse_rule(argv)) {
+		goto out;
+	}
+
+	conf_load.rule_filter = true;
+
+out:
+	freeparsedargs(argv);
+	return ret;
+}
 
 static error_t pahole__options_parser(int key, char *arg,
 				      struct argp_state *state)
@@ -1642,6 +1829,8 @@ static error_t pahole__options_parser(int key, char *arg,
 		conf_load.hashtable_bits = atoi(arg);	break;
 	case ARGP_devel_stats:
 		conf_load.ptr_table_stats = true;	break;
+	case ARGP_filter_rule:
+		pahole__deal_filter_rule_opt(arg);		break;
 	default:
 		return ARGP_ERR_UNKNOWN;
 	}
@@ -2774,6 +2963,187 @@ out:
 
 static struct type_instance *header;
 
+static size_t type__get(struct tag *type, const struct cu *cu,
+			    const char *name, char *buf, int len)
+{
+	char tbf[128];
+	char namebfptr[258];
+	struct type *ctype;
+	size_t printed = 0;
+	int n = len;
+
+	if (type == NULL)
+		goto out;
+
+next_type:
+	switch (type->tag) {
+	case DW_TAG_pointer_type:
+		if (type->type != 0) {
+			struct tag *ptype = cu__type(cu, type->type);
+			if (ptype == NULL)
+				goto out;
+			if (type->type == ptype->type) {
+				goto out;
+			}
+			if ((tag__is_struct(ptype) || tag__is_union(ptype) ||
+			    tag__is_enumeration(ptype)) && type__name(tag__type(ptype)) == NULL) {
+				if (name == namebfptr)
+					goto out;
+				snprintf(namebfptr, sizeof(namebfptr), "* %s", name);
+				name = namebfptr;
+				type = ptype;
+				goto next_type;
+			}
+		}
+		/* Fall Thru */
+	default:
+		printed += snprintf(buf, n, "%s", tag__name(type, cu, tbf, sizeof(tbf), NULL));
+		break;
+	case DW_TAG_class_type:
+	case DW_TAG_structure_type:
+		ctype = tag__type(type);
+
+		if (type__name(ctype) != NULL) {
+			printed += snprintf(buf, n, "%s %s",
+					   (type->tag == DW_TAG_class_type) ? "class" : "struct",
+					   type__name(ctype));
+		}
+		break;
+	}
+out:
+	return printed;
+}
+
+void cu__rule_filter(struct cu *cu)
+{
+	struct tag *tag, *pos_type, *ptype;
+	struct type *type;
+	struct class_member *member;
+	struct class *pos;
+	uint32_t id;
+	int i, j;
+	const char *name = NULL;
+	struct filter_rule *p_filter_rule = &conf_load.conf_rule;
+	struct filter_rule_offset *p_rule_offset = p_filter_rule->rule;
+	char buf[128];
+	char tbf[128];
+	char *pTbf;
+
+	cu__for_each_struct_or_union(cu, id, pos) {
+		bool existing_entry;
+		struct structure *str;
+
+		if (pos->type.namespace.name == 0 &&
+		    !(class__include_anonymous ||
+		      class__include_nested_anonymous))
+			continue;
+		/*
+		 * FIXME: No sense in adding an anonymous struct to the list of
+		 * structs already printed, as we look for the name... The
+		 * right fix probably will be to call class__fprintf on a
+		 * in-memory FILE, do a hash, and look it by full contents, not
+		 * by name. And this is needed for CTF as well, but its late now
+		 * and I'm sleepy, will leave for later...
+		 */
+		if (pos->type.namespace.name != 0) {
+			str = structures__add(pos, cu, id, &existing_entry);
+			if (str == NULL) {
+				fprintf(stderr, "pahole: insufficient memory for "
+					"processing %s, skipping it...\n", cu->name);
+				return;
+			}
+
+			/* Already printed... */
+			if (existing_entry) {
+				str->nr_files++;
+				continue;
+			}
+		}
+
+
+		tag = class__tag(pos);
+		if (DW_TAG_structure_type == tag->tag) {
+			type = &pos->type;
+
+			//check rule size
+			if (p_filter_rule->size != 0 && p_filter_rule->size != type->size) {
+				continue;
+			}
+			type__for_each_tag(type, tag) {
+				member = tag__class_member(tag);
+				pos_type = cu__type(cu, tag->type);
+
+				if (member->byte_offset < p_filter_rule->offset_min) {
+					continue;
+				}
+				if (member->byte_offset > p_filter_rule->offset_max) {
+					break;
+				}
+				name = NULL;
+				if(0) {
+					if (pos_type->tag == DW_TAG_typedef || pos_type->tag == DW_TAG_structure_type) {
+						name = type__name(tag__type(pos_type));
+					} else if (pos_type->tag == DW_TAG_pointer_type) {
+						ptype = cu__type(cu, pos_type->type);
+						if (ptype == NULL) {
+							continue;
+						}
+						if(ptype->tag == DW_TAG_typedef || ptype->tag == DW_TAG_structure_type) {
+							name = type__name(tag__type(ptype));
+						} else {
+							continue;
+						}
+					} else {
+						continue;
+					}
+
+					if (name == NULL) {
+						continue;
+					}
+				}
+
+				memset(buf, 0, sizeof(buf));
+				type__get(pos_type, cu, class_member__name(member), buf, sizeof(buf));
+				//printf("%s\n", buf);
+				name = buf;
+
+				for (i = 0; i < p_filter_rule->rule_num; i++) {
+					if (!p_rule_offset[i].flag && member->byte_offset == p_rule_offset[i].offset) {
+						if (p_rule_offset[i].tag == pos_type->tag) {
+							if (!strcmp(name, p_rule_offset[i].name)) {
+								p_rule_offset[i].flag = 1;
+							} else if (p_rule_offset[i].cnt) {
+								memset(tbf, 0, sizeof(tbf));
+								pTbf = tbf;
+								pTbf += snprintf(tbf, sizeof(tbf), "struct %s",type__name(type));
+								for(j = 0; j < p_rule_offset[i].cnt; j++) {
+									*pTbf++ = ' ';
+									*pTbf++ = '*';
+								}
+								if (!strcmp(name, tbf)) {
+									p_rule_offset[i].flag = 1;
+								}
+							}
+						}
+					}
+				}
+			}
+
+			for (i = 0; i < p_filter_rule->rule_num; i++) {
+				if (!p_rule_offset[i].flag) {
+					break;
+				}
+			}
+			if (i == p_filter_rule->rule_num) {
+				printf("struct %s\n", type__name(type));
+			}
+			for (i = 0; i < p_filter_rule->rule_num; i++) {
+				p_rule_offset[i].flag = 0;
+			}
+		}
+	}
+}
+
 static enum load_steal_kind pahole_stealer(struct cu *cu,
 					   struct conf_load *conf_load)
 {
@@ -2842,7 +3212,11 @@ out_btf:
 		if (word_size != 0)
 			cu_fixup_word_size_iterator(cu);
 
-		print_classes(cu);
+		if (conf_load->rule_filter) {
+			cu__rule_filter(cu);
+		} else {
+			print_classes(cu);
+		}
 
 		if (sort_output && formatter == class_formatter)
 			ret = LSK__KEEPIT;

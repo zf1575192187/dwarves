@@ -36,6 +36,22 @@ typedef uint32_t type_id_t;
 struct btf;
 struct conf_fprintf;
 
+struct filter_rule_offset {
+	int offset;
+	int tag;
+	int flag;
+	int cnt;
+	char *name;
+};
+
+struct filter_rule {
+	int size;
+	int offset_min;
+	int offset_max;
+	int rule_num;
+	struct filter_rule_offset *rule;
+};
+
 /** struct conf_load - load configuration
  * @extra_dbg_info - keep original debugging format extra info
  *		     (e.g. DWARF's decl_{line,file}, id, etc)
@@ -64,6 +80,8 @@ struct conf_load {
 	const char		*kabi_prefix;
 	struct btf		*base_btf;
 	struct conf_fprintf	*conf_fprintf;
+	bool			rule_filter;
+	struct filter_rule conf_rule;
 };
 
 /** struct conf_fprintf - hints to the __fprintf routines
